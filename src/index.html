@@ -383,6 +383,20 @@
                     }
                 }
             }
+
+                    // --- 修复：更强壮的拖拽调用 ---
+        async function startWindowDrag() {
+            try {
+                const tauriWinObj = window.__TAURI__?.window || window.__TAURI__?.core;
+                const win = tauriWinObj?.appWindow || tauriWinObj?.getCurrentWindow?.();
+                if (win && typeof win.startDragging === 'function') {
+                    await win.startDragging();
+                }
+            } catch (e) {
+                console.warn("云端拖拽接口被拦截:", e);
+            }
+        }
+
         });
 
         // --- 核心缩放逻辑 ---
@@ -448,41 +462,68 @@
         // 原本的其他控制方法（如 applyGlobalScale、applyClockScale 等）保持不动...
 
         // --- 核心切换方法：带系统锁的版本 ---
-        async function toggleMiniMode() {
-            const tauriWinObj = window.__TAURI__.window || window.__TAURI__.core;
-            const win = tauriWinObj?.appWindow || tauriWinObj?.getCurrentWindow?.() || tauriWinObj?.getCurrent?.();
-            const LogicalSize = tauriWinObj?.LogicalSize || window.__TAURI__.window?.LogicalSize;
-
-            // 如果是第一次进入小窗，且还没被 resize 拖拽事件记录过，主动抓取一次
-            if (!isMiniMode && !normalWindowSize && win) {
-                try { normalWindowSize = await win.outerSize(); } catch(e){}
+        // --- 核心切换方法：带系统锁 & 云端安全适配的版本 ---
+        window.toggleMiniMode = async function() {
+            // 1. 云端安全判空：防止 __TAURI__ 未加载时直接报错卡死
+            if (!window.__TAURI__) {
+                console.warn("未检测到 Tauri 环境，小窗模式仅在桌面端可用");
+                return;
             }
 
-            isMiniMode = !isMiniMode;
-            document.body.classList.toggle('mini-mode', isMiniMode); // 兼容你的原有代码
-            menu.style.display = 'none'; 
-            updateLayoutScale(); 
-            
-            if (win) {
-                try {
+            try {
+                const tauri = window.__TAURI__;
+                // 兼容不同版本 Tauri 的 API 抓取
+                const tauriWinObj = tauri.window || tauri.core;
+                const win = tauriWinObj?.appWindow || tauriWinObj?.getCurrentWindow?.() || tauriWinObj?.getCurrent?.();
+                const LogicalSize = tauriWinObj?.LogicalSize || tauri.window?.LogicalSize;
+
+                // 如果是第一次进入小窗，且还没被 resize 拖拽事件记录过，主动抓取一次
+                if (!isMiniMode && !normalWindowSize && win && win.outerSize) {
+                    try { normalWindowSize = await win.outerSize(); } catch(e){}
+                }
+
+                isMiniMode = !isMiniMode;
+                document.body.classList.toggle('mini-mode', isMiniMode); 
+                const menu = document.getElementById('menu');
+                if (menu) menu.style.display = 'none'; 
+                
+                // 刷新内部 UI (调用你现有的缩放函数)
+                if (typeof updateLayoutScale === 'function') updateLayoutScale(); 
+                
+                if (win) {
                     if (isMiniMode) {
+                        // --- 进入小窗 ---
                         const safeWidth = (100 * 3 + 24 * 2 + 60) * currentClockScale * currentGlobalScale;
                         const safeHeight = 150 * currentClockScale * currentGlobalScale; 
-                        if (LogicalSize) await win.setSize(new LogicalSize(Math.max(safeWidth, 200), Math.max(safeHeight, 100)));
-                        await win.setAlwaysOnTop(true);
+                        
+                        if (LogicalSize && typeof win.setSize === 'function') {
+                            await win.setSize(new LogicalSize(Math.max(safeWidth, 200), Math.max(safeHeight, 100)));
+                        }
+                        if (typeof win.setAlwaysOnTop === 'function') {
+                            await win.setAlwaysOnTop(true);
+                        }
                     } else {
-                        // 【核心修复】恢复正常模式时上锁，忽略系统由于 bug 引发的这 30px 尺寸膨胀！
+                        // --- 恢复正常模式 (保留了你的核心修复锁) ---
                         isRestoring = true; 
                         
-                        if (normalWindowSize) await win.setSize(normalWindowSize);
-                        if (!isAlwaysOnTop) await win.setAlwaysOnTop(false);
+                        if (normalWindowSize && typeof win.setSize === 'function') {
+                            await win.setSize(normalWindowSize);
+                        }
+                        
+                        // 如果原本没有开启全局置顶，才取消置顶
+                        if (!isAlwaysOnTop && typeof win.setAlwaysOnTop === 'function') {
+                            await win.setAlwaysOnTop(false);
+                        }
                         
                         // 等待系统重绘和缩放彻底完成（约800ms），再解开锁
                         setTimeout(() => { isRestoring = false; }, 800);
                     }
-                } catch (e) { console.log("调整窗口尺寸失败:", e); }
+                }
+            } catch (err) {
+                console.error("云端调用窗口权限失败，请检查 Pake 配置是否开启了 setSize 权限:", err);
             }
-        }
+        };
+
 
         let mode = 'clock', isRunning = false, showDate = true, is24Hour = true, seconds = 0, lastVals = ["", "", ""];
         let timerTotalSeconds = 1500; 
@@ -490,15 +531,46 @@
         let pomoCurrentPhase = 'work'; let pomoCompletedWork = 0;
         const menu = document.getElementById('menu'); let isAlwaysOnTop = false;
         
-        async function toggleAlwaysOnTop() {
-            isAlwaysOnTop = !isAlwaysOnTop; document.getElementById('on-top-btn').innerText = isAlwaysOnTop ? "📌 取消窗口置顶" : "📌 开启窗口置顶"; menu.style.display = 'none';
-            if (window.__TAURI__) {
-                try {
-                    const win = window.__TAURI__.window.appWindow || window.__TAURI__.window.getCurrentWindow?.() || window.__TAURI__.window.getCurrent?.();
-                    if(win) await win.setAlwaysOnTop(isAlwaysOnTop);
-                } catch (e) {}
+        // ==========================================
+        // 核心修复：云端安全的窗口置顶功能
+        // ==========================================
+        window.toggleAlwaysOnTop = async function() {
+            // 1. 切换变量状态
+            isAlwaysOnTop = !isAlwaysOnTop; 
+            
+            // 2. 更新按钮文本 (增加容错，防止找不到元素导致后续代码卡死)
+            const onTopBtn = document.getElementById('on-top-btn');
+            if (onTopBtn) {
+                onTopBtn.innerText = isAlwaysOnTop ? "📌 取消窗口置顶" : "📌 开启窗口置顶"; 
             }
-        }
+            
+            // 3. 隐藏菜单
+            const menu = document.getElementById('menu');
+            if (menu) menu.style.display = 'none';
+
+            // 4. 云端环境防崩溃检测
+            if (!window.__TAURI__) {
+                console.warn("未检测到 Tauri 环境，置顶功能仅在桌面端可用");
+                return;
+            }
+
+            // 5. 核心：调用系统底层 API 设置置顶
+            try {
+                const tauri = window.__TAURI__;
+                // 兼容 Tauri V1 和 V2，精准抓取窗口对象
+                const tauriWinObj = tauri.window || tauri.core;
+                const win = tauriWinObj?.appWindow || tauriWinObj?.getCurrentWindow?.() || tauriWinObj?.getCurrent?.();
+                
+                if (win && typeof win.setAlwaysOnTop === 'function') {
+                    await win.setAlwaysOnTop(isAlwaysOnTop);
+                } else {
+                    console.warn("云端对象抓取失败，缺少 setAlwaysOnTop 权限");
+                }
+            } catch (err) {
+                console.error("调用置顶权限被拦截，请确认 Pake Plus 已注入 Tauri API:", err);
+            }
+        };
+
 
         async function toggleFullScreen() {
             menu.style.display = 'none';
@@ -512,12 +584,33 @@
             else if (document.exitFullscreen) document.exitFullscreen();
         }
 
-        window.quitApp = function() { 
-            if (window.__TAURI__) {
-                const invoke = window.__TAURI__.invoke || window.__TAURI__.core?.invoke || window.__TAURI__.tauri?.invoke;
-                if(invoke) invoke('plugin:process|exit', { code: 0 }).catch(() => window.close());
-            } else window.close();
-        };
+        // --- 修复：彻底退出软件 (解决云端打包留白底窗口问题) ---
+        async function quitApp() {
+            try {
+                const tauri = window.__TAURI__;
+                
+                // 1. Tauri v1 杀进程 API (最常见)
+                if (tauri && tauri.process && tauri.process.exit) {
+                    await tauri.process.exit(0); 
+                } 
+                // 2. Tauri v2 或 Pake 新版杀进程 API
+                else if (tauri && tauri.core && tauri.core.invoke) {
+                    await tauri.core.invoke('plugin:process|exit', { code: 0 }); 
+                } 
+                // 3. 彻底关闭当前应用窗口
+                else if (tauri && tauri.window && tauri.window.appWindow) {
+                    await tauri.window.appWindow.close();
+                } 
+                // 4. 网页兜底退出 (本地测试时触发)
+                else {
+                    window.close(); 
+                }
+            } catch (e) {
+                console.warn("调用系统退出失败，尝试强制关闭:", e);
+                window.close(); // 最终兜底
+            }
+        }
+
 
         function updateSlot(index, newValue) {
             const val = String(newValue).padStart(2, '0'); if (val === lastVals[index]) return;
