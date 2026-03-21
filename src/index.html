@@ -768,6 +768,7 @@
             }
         }
 
+
         // 页面 DOM 加载完成后，立即执行初始化逻辑
         window.addEventListener('DOMContentLoaded', bootApp);
         // ==========================================
@@ -876,6 +877,36 @@
             localStorage.setItem('timeless_bg_blur', value);
         };
 
+// --- 终极按键监听与焦点唤醒 ---
+(function initBulletproofShortcut() {
+    // 1. 给网页的身体 (body) 强行加上可聚焦属性，使其具备接收键盘按键的资格
+    document.body.setAttribute('tabindex', '-1');
+    document.body.style.outline = 'none'; // 防止聚焦时出现丑陋的黑框
+
+    // 2. 延迟 500ms，等云端环境稍微稳定后，程序自动模拟一次“拉拽窗口”和“鼠标点击”的动作
+    setTimeout(() => {
+        document.body.focus();
+        // 发送一个虚假的 Resize (尺寸改变) 事件，强行唤醒那些沉睡的监听器
+        window.dispatchEvent(new Event('resize'));
+    }, 500);
+
+    // 3. 将快捷键绑定在最顶层的 window 上，并开启 "事件捕获" (true)
+    // 这意味着只要你按下键盘，这段代码会第一个跳出来拦截，不管网页里有什么输入框或按钮
+    window.addEventListener('keydown', function(e) {
+        // 精准捕捉 Ctrl + Space (兼容不同浏览器的 Space 键名)
+        if (e.ctrlKey && (e.code === 'Space' || e.key === ' ')) {
+            e.preventDefault();  // 阻止浏览器的默认行为（比如空格键导致页面滚动）
+            e.stopPropagation(); // 阻止事件被别人抢走
+            
+            // 呼叫咱们的小窗切换函数
+            if (typeof toggleMiniMode === 'function') {
+                toggleMiniMode();
+            } else {
+                console.error("未能找到 toggleMiniMode 函数！");
+            }
+        }
+    }, true); // 👈 这里的 true 是灵魂，它赋予了这个快捷键至高无上的优先级
+})();
 
 
     </script>
