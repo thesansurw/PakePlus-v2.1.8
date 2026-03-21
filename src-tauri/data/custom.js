@@ -151,3 +151,44 @@ window.toggleMiniMode = async function() {
         console.error("小窗切换失败:", err);
     }
 };
+// --- 核心修复：云端专用的轮询初始化机制 ---
+(function ensureWindowSizeInCloud() {
+    let attempts = 0;
+    const maxAttempts = 20; // 最多尝试 20 次 (共计 2 秒)
+
+    const tryGetSize = async () => {
+        attempts++;
+        try {
+            // 获取 Tauri 2.0 窗口对象
+            const tauri = window.__TAURI__;
+            const tauriWinObj = tauri?.window || tauri?.core;
+            const win = tauriWinObj?.appWindow || tauriWinObj?.getCurrentWindow?.() || tauriWinObj?.getCurrent?.();
+            
+            if (win && typeof win.outerSize === 'function') {
+                const size = await win.outerSize();
+                
+                // 核心判断：只有当宽度真正大于 0 时，才说明云端底层把窗口画完了
+                if (size && size.width > 0) {
+                    normalWindowSize = size;
+                    console.log(`[云端环境适配] 第 ${attempts} 次尝试：成功抓取真实物理尺寸!`, normalWindowSize);
+                    
+                    // 顺便抢一下焦点
+                    if (typeof win.setFocus === 'function') await win.setFocus();
+                    return; // 拿到尺寸，直接下班！
+                }
+            }
+        } catch (e) {
+            // 云端冷启动时调用底层 API 容易报错，直接忽略，等下一次循环
+        }
+
+        // 如果还没拿到，且没超过最大次数，100毫秒后再试
+        if (attempts < maxAttempts) {
+            setTimeout(tryGetSize, 100);
+        } else {
+            console.warn("[云端环境适配] 抓取尺寸超时，等待用户首次手动触发");
+        }
+    };
+
+    // 网页一加载完毕，立刻开始连环夺命 Call
+    tryGetSize();
+})();
